@@ -1,4 +1,7 @@
-"""Current Limit control (holding 1000-1001), the only register this integration writes.
+"""Current Limit control (holding 1000-1001).
+
+Besides IF_START (1006, the Start charging button) the only register this integration
+writes.
 
 Range: 6 A (the IEC 61851 minimum charging current) up to the maximum current set in
 the NexBlue app (input 136-137), never above the register's 32 A.

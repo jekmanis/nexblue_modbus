@@ -2,7 +2,7 @@
 
 `nexblue_modbus` is a custom Home Assistant integration for the NexBlue Edge 2 EV
 charger. It works over local Modbus TCP, with no cloud. It creates a **NexBlue <model>**
-device with live sensors and a **Current limit** control.
+device with live sensors, a **Current limit** control and a **Start charging** button.
 
 Tested with an Edge 2 (NB1620B, FW 03.09.97) on Home Assistant 2026.10.2, which bundles
 pymodbus 3.13.1. The test suite also passes against 2026.10.0, the minimum in
@@ -78,6 +78,8 @@ Entity IDs start with the device name, which defaults to `NexBlue <model>`. For 
 | `sensor.<device>_lifetime_energy` | input 130-133 | Energy, `total_increasing`, usable in the Energy dashboard |
 | `sensor.<device>_max_current` | input 136-137 | A, the maximum set in the app |
 | `number.<device>_current_limit` | holding 1000-1001 | 6 A up to the app max current (input 136-137, at most 32 A); read and **write**, kept alive (below) |
+| `button.<device>_start_charging` | holding 1006 (IF_START) | Starts charging. Only acts in state `preparing` (below) |
+| `binary_sensor.<device>_car_connected` | input 100 | Plug: on in preparing, charging, suspended_evse, suspended_ev, finishing; off in available, reserved, unavailable, faulted |
 | `binary_sensor.<device>_error` | input 400 | Diagnostic, on when any error bit is set; attribute `active` lists them |
 | `binary_sensor.<device>_warning` | input 401 | Diagnostic, as above for warnings |
 | `sensor.<device>_error_code` / `_warning_code` / `_waiting_code` | input 400-402 | Diagnostic, raw bitsets with `active` labels |
@@ -87,9 +89,22 @@ Entity IDs start with the device name, which defaults to `NexBlue <model>`. For 
 
 The device info shows the model, serial number, firmware and hardware version.
 
-**Write scope:** the integration writes only the Current limit (holding 1000-1001).
-Fallback limit/timeout, IF_START (start/stop) and phase mode are read or ignored, because
+**Write scope:** the integration writes only the Current limit (holding 1000-1001) and
+IF_START = 1 (START, holding 1006) from the Start charging button. It never writes STOP.
+Fallback limit/timeout (1002-1005) and phase mode (1007) are read or ignored, because
 writing them changes charging behaviour.
+
+### Start charging
+
+The button writes IF_START = 1 (START). It only acts while the charger is in state
+`preparing`: a car is plugged in but charging hasn't started, for example because you
+usually start it in the NexBlue app or by a schedule. In any other state (already
+charging, no car, ...) a press fails with an error and nothing is sent. The state is
+checked again on the charger right before the write. There is no stop button.
+
+- IF_START has no effect while the charger is controlled by OCPP (vendor document).
+- The NexBlue app, portal and cloud API can also start and stop charging. NexBlue
+  recommends using one authorization method at a time.
 
 ### Current limit keepalive
 
