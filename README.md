@@ -108,12 +108,15 @@ keepalive:
   charger's own fallback behaves as without HA.
 - shortens polling to the keepalive interval if your scan interval is longer.
 - re-applies HA's value if the charger restarts and resets 1000 to its 16 A default.
-- isn't stored across HA restarts or integration reloads. After a restart it starts again
-  the next time the limit is set, so have an automation set it on startup if you rely on
-  it.
+- survives HA restarts and integration reloads. The limit HA last set is kept as restore
+  state; on setup it is written once more and the keepalive resumes. Only a limit HA set
+  itself is kept. The register value is never restored as one, so a charger HA never
+  controlled stays read-only. If the stored value is outside today's 6 A to max-current
+  range (for example, the app maximum was lowered), it's clamped and a warning is logged.
 
-To hand control back to the charger's fallback, reload the integration. Its effect
-during a real charging session hasn't been verified yet.
+To hand control back to the charger's own fallback, delete the integration entry and add
+it again. That clears the stored limit. Its effect during a real charging session hasn't
+been verified yet.
 
 ## Development
 

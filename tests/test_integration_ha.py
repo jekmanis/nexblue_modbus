@@ -42,12 +42,18 @@ class _Coordinator:
         self.device_info = {"identifiers": {("nexblue_modbus", identity.serial)}}
         self.last_update_success = True
         self.written = []
+        self.keepalive = nb.CurrentLimitKeepalive()
+        self.fail_writes: Exception | None = None
 
     def async_add_listener(self, *_args, **_kwargs):
         return lambda: None
 
     async def async_set_current_limit(self, amps):
+        # Mirrors NexBlueCoordinator: write, then arm the keepalive with the setpoint.
+        if self.fail_writes is not None:
+            raise self.fail_writes
         self.written.append(amps)
+        self.keepalive.wrote(amps)
 
 
 @pytest.fixture
@@ -256,3 +262,81 @@ def test_current_limit_max_follows_app_max(component, coordinator, app_max, expe
 
     coordinator.data = dataclasses.replace(coordinator.data, max_current=app_max)
     assert component.number.NexBlueCurrentLimit(coordinator).native_max_value == expected
+
+
+# --------------------------------------------------------------------------
+# Current limit kept across restarts / reloads
+# --------------------------------------------------------------------------
+
+def _add_number(component, coordinator, stored):
+    """Run the number's async_added_to_hass with ``stored`` as the restored extra data."""
+    import asyncio
+
+    number = component.number.NexBlueCurrentLimit(coordinator)
+
+    async def last_extra():
+        return stored
+
+    number.async_get_last_extra_data = last_extra
+    asyncio.run(number.async_added_to_hass())
+    return number
+
+
+def test_restore_data_is_the_ha_setpoint_not_the_reading(component, coordinator):
+    import asyncio
+
+    number = component.number.NexBlueCurrentLimit(coordinator)
+    assert number.native_value == 16.0
+    assert number.extra_restore_state_data.as_dict() == {"setpoint": None}
+    asyncio.run(number.async_set_native_value(10.0))
+    assert number.extra_restore_state_data.as_dict() == {"setpoint": 10.0}
+
+
+def test_restored_setpoint_is_written_once_and_keepalive_resumes(component, coordinator):
+    stored = component.number.CurrentLimitStoredData(12.0)
+    _add_number(component, coordinator, stored)
+    assert coordinator.written == [12.0]
+    assert coordinator.keepalive.setpoint == 12.0
+
+
+@pytest.mark.parametrize("stored", [None, "no setpoint", "garbage"])
+def test_nothing_stored_means_no_write_and_no_keepalive(component, coordinator, stored):
+    from homeassistant.helpers.restore_state import RestoredExtraData
+
+    data = {None: None,
+            "no setpoint": RestoredExtraData({"setpoint": None}),
+            "garbage": RestoredExtraData({"setpoint": "x"})}[stored]
+    _add_number(component, coordinator, data)
+    assert coordinator.written == []
+    assert coordinator.keepalive.setpoint is None
+
+
+def test_restored_extra_data_from_storage_round_trips(component, coordinator):
+    from homeassistant.helpers.restore_state import RestoredExtraData
+
+    _add_number(component, coordinator, RestoredExtraData({"setpoint": 16.0}))
+    assert coordinator.written == [16.0]
+
+
+@pytest.mark.parametrize("setpoint, expected", [(25.0, 20.0), (3.0, 6.0)])
+def test_out_of_range_setpoint_is_clamped_with_a_warning(component, coordinator, caplog,
+                                                         setpoint, expected):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _add_number(component, coordinator, component.number.CurrentLimitStoredData(setpoint))
+    assert coordinator.written == [expected]          # app max is 20 A, UI min 6 A
+    assert coordinator.keepalive.setpoint == expected
+    assert any("outside" in r.getMessage() for r in caplog.records)
+
+
+def test_restore_write_failure_is_a_warning_not_a_crash(component, coordinator, caplog):
+    import logging
+
+    # The package's own exception class: tests import nexblue_client by path, which is a
+    # different module object from custom_components.nexblue_modbus.nexblue_client.
+    coordinator.fail_writes = component.number.NexBlueError("charger unreachable")
+    with caplog.at_level(logging.WARNING):
+        _add_number(component, coordinator, component.number.CurrentLimitStoredData(12.0))
+    assert coordinator.keepalive.setpoint is None
+    assert any("keepalive not resumed" in r.getMessage() for r in caplog.records)
