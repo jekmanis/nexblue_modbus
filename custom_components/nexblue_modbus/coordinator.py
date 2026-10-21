@@ -92,3 +92,8 @@ class NexBlueCoordinator(DataUpdateCoordinator[ChargerData]):
         if self.data is not None:
             self._apply_interval(self.data.fallback_timeout)
             self.async_set_updated_data(dataclasses.replace(self.data, current_limit=readback))
+
+    async def async_start_charging(self) -> None:
+        """IF_START = START (the client refuses unless the charger is preparing), then poll."""
+        await self.client.start_charging()
+        await self.async_request_refresh()

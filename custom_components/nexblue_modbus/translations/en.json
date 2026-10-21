@@ -44,6 +44,11 @@
         "name": "Warning"
       }
     },
+    "button": {
+      "start_charging": {
+        "name": "Start charging"
+      }
+    },
     "number": {
       "current_limit": {
         "name": "Current limit"

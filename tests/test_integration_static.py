@@ -62,7 +62,7 @@ def _translation_keys(platform: str) -> set[str]:
     return keys
 
 
-@pytest.mark.parametrize("platform", ["sensor", "binary_sensor", "number"])
+@pytest.mark.parametrize("platform", ["sensor", "binary_sensor", "number", "button"])
 def test_every_entity_has_a_name(platform):
     strings = json.loads((COMPONENT_DIR / "strings.json").read_text(encoding="utf-8"))
     used = _translation_keys(platform)

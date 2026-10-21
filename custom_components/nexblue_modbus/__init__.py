@@ -10,7 +10,8 @@ from .const import CONF_UNIT_ID
 from .coordinator import NexBlueConfigEntry, NexBlueCoordinator
 from .nexblue_client import NexBlueClient, NexBlueError
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.NUMBER, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER,
+                             Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: NexBlueConfigEntry) -> bool:

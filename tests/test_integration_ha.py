@@ -28,7 +28,8 @@ def component():
     parent.__path__ = [str(COMPONENT_DIR.parent)]
     sys.modules.setdefault("custom_components", parent)
     modules = {name: importlib.import_module(f"custom_components.nexblue_modbus.{name}")
-               for name in ("config_flow", "coordinator", "sensor", "binary_sensor", "number")}
+               for name in ("config_flow", "coordinator", "sensor", "binary_sensor", "number",
+                            "button")}
     importlib.import_module("custom_components.nexblue_modbus")
     return types.SimpleNamespace(**modules)
 
@@ -42,6 +43,7 @@ class _Coordinator:
         self.device_info = {"identifiers": {("nexblue_modbus", identity.serial)}}
         self.last_update_success = True
         self.written = []
+        self.starts = 0
         self.keepalive = nb.CurrentLimitKeepalive()
         self.fail_writes: Exception | None = None
 
@@ -54,6 +56,11 @@ class _Coordinator:
             raise self.fail_writes
         self.written.append(amps)
         self.keepalive.wrote(amps)
+
+    async def async_start_charging(self):
+        if self.fail_writes is not None:
+            raise self.fail_writes
+        self.starts += 1
 
 
 @pytest.fixture
@@ -340,3 +347,51 @@ def test_restore_write_failure_is_a_warning_not_a_crash(component, coordinator, 
         _add_number(component, coordinator, component.number.CurrentLimitStoredData(12.0))
     assert coordinator.keepalive.setpoint is None
     assert any("keepalive not resumed" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# Start charging button
+# --------------------------------------------------------------------------
+
+def _press(component, coordinator, state=None):
+    import asyncio
+    import dataclasses
+
+    if state is not None:
+        code = next(c for c, n in nb.STATE_NAMES.items() if n == state)
+        coordinator.data = dataclasses.replace(coordinator.data, state=code)
+    button = component.button.NexBlueStartCharging(coordinator)
+    asyncio.run(button.async_press())
+
+
+def test_start_button_starts_when_preparing(component, coordinator):
+    button = component.button.NexBlueStartCharging(coordinator)
+    assert button.unique_id == "E2TEST0001_start_charging"
+    _press(component, coordinator, "preparing")
+    assert coordinator.starts == 1
+
+
+@pytest.mark.parametrize("state", sorted(set(nb.STATE_NAMES.values()) - {"preparing"}))
+def test_start_button_refused_in_any_other_state(component, coordinator, state):
+    from homeassistant.exceptions import HomeAssistantError
+
+    with pytest.raises(HomeAssistantError, match=f"preparing.*{state}"):
+        _press(component, coordinator, state)
+    assert coordinator.starts == 0
+
+
+def test_start_button_refused_without_data(component, coordinator):
+    from homeassistant.exceptions import HomeAssistantError
+
+    coordinator.data = None
+    with pytest.raises(HomeAssistantError):
+        _press(component, coordinator)
+    assert coordinator.starts == 0
+
+
+def test_start_button_write_failure_is_a_ha_error(component, coordinator):
+    from homeassistant.exceptions import HomeAssistantError
+
+    coordinator.fail_writes = component.button.NexBlueError("charger unreachable")
+    with pytest.raises(HomeAssistantError, match="charger unreachable"):
+        _press(component, coordinator, "preparing")
