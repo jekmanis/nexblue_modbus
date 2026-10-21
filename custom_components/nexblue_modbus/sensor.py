@@ -20,7 +20,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import NexBlueConfigEntry, NexBlueCoordinator
@@ -32,6 +32,7 @@ from .nexblue_client import (
     WAITING_BITS,
     WARNING_BITS,
     ChargerData,
+    ConfirmedDropGuard,
     MonotonicCounterGuard,
     active_bits,
 )
@@ -43,8 +44,9 @@ PARALLEL_UPDATES = 0
 class NexBlueSensorDescription(SensorEntityDescription):
     value_fn: Callable[[ChargerData], Any]
     attrs_fn: Callable[[ChargerData], dict[str, Any]] | None = None
-    # Lifetime counter: false 0 / lower readings are held at the last good value.
-    monotonic: bool = False
+    # Guard for total_increasing counters (see nexblue_client): false 0 / low readings
+    # must not reach the statistics as a meter reset. Applied once per poll.
+    guard_factory: Callable[[], MonotonicCounterGuard | ConfirmedDropGuard] | None = None
 
 
 def _rounded(attr: str, digits: int = 2) -> Callable[[ChargerData], float]:
@@ -101,13 +103,13 @@ SENSORS: tuple[NexBlueSensorDescription, ...] = (
         key="session_energy", translation_key="session_energy",
         device_class=SensorDeviceClass.ENERGY, state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, suggested_display_precision=2,
-        value_fn=_rounded("session_energy", 3)),
+        value_fn=_rounded("session_energy", 3), guard_factory=ConfirmedDropGuard),
     NexBlueSensorDescription(
         key="lifetime_energy", translation_key="lifetime_energy",
         device_class=SensorDeviceClass.ENERGY, state_class=SensorStateClass.TOTAL_INCREASING,
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         suggested_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, suggested_display_precision=1,
-        value_fn=lambda d: d.lifetime_energy, monotonic=True),
+        value_fn=lambda d: d.lifetime_energy, guard_factory=MonotonicCounterGuard),
     # A configured limit, not a measurement: no state_class, so no long-term statistics.
     _current("max_current", "max_current", measurement=False),
     _current("fallback_current", "fallback_current", entity_category=EntityCategory.DIAGNOSTIC),
@@ -146,14 +148,16 @@ class NexBlueSensor(NexBlueEntity, RestoreSensor):
                  description: NexBlueSensorDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        self._guard = MonotonicCounterGuard() if description.monotonic else None
+        factory = description.guard_factory
+        self._guard = factory() if factory is not None else None
+        self._guarded_value: Any = None
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         if self._guard is None:
             return
-        # Seed the guard with the value from before the restart, so a false 0 on the
-        # first poll after a restart is held back too.
+        # Seed the guard with the value from before the restart / reload, so a false
+        # reading on the first poll afterwards is held back too.
         last = await self.async_get_last_sensor_data()
         if (last is not None and last.native_value is not None
                 and last.native_unit_of_measurement == self.native_unit_of_measurement):
@@ -161,11 +165,24 @@ class NexBlueSensor(NexBlueEntity, RestoreSensor):
                 self._guard.last = float(last.native_value)
             except (TypeError, ValueError):
                 pass
+        self._refresh_guarded_value()
+
+    def _refresh_guarded_value(self) -> None:
+        """Feed the current poll through the guard - exactly once per poll."""
+        self._guarded_value = self._guard.filter(
+            self.entity_description.value_fn(self.coordinator.data))
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        if self._guard is not None:
+            self._refresh_guarded_value()
+        super()._handle_coordinator_update()
 
     @property
     def native_value(self) -> Any:
-        value = self.entity_description.value_fn(self.coordinator.data)
-        return self._guard.filter(value) if self._guard is not None else value
+        if self._guard is not None:
+            return self._guarded_value
+        return self.entity_description.value_fn(self.coordinator.data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

@@ -206,6 +206,40 @@ class MonotonicCounterGuard:
         return value
 
 
+class ConfirmedDropGuard:
+    """Session energy: rises pass at once, a drop only once it has persisted.
+
+    The session counter drops to 0 when a new session starts, so a lower reading can't
+    simply be rejected. But one false 0 mid-session would look like a meter reset to Home
+    Assistant's ``total_increasing`` statistics and double-count the session. So a reading
+    below the last accepted value is accepted only after ``confirm_polls`` consecutive
+    polls have all been below it; until then the last accepted value is returned.
+
+    ``filter`` must be called exactly once per poll.
+    """
+
+    def __init__(self, last: float | None = None, confirm_polls: int = 3) -> None:
+        self.last = last
+        self._confirm = confirm_polls
+        self._low_polls = 0
+
+    def filter(self, value: float | None) -> float | None:
+        if value is None:
+            return self.last
+        if self.last is None or value >= self.last:
+            self.last = value
+            self._low_polls = 0
+            return value
+        self._low_polls += 1
+        if self._low_polls >= self._confirm:
+            _LOGGER.debug("counter drop %s -> %s confirmed after %d polls",
+                          self.last, value, self._low_polls)
+            self.last = value
+            self._low_polls = 0
+            return value
+        return self.last
+
+
 @dataclass(frozen=True)
 class DeviceInfo:
     brand: str

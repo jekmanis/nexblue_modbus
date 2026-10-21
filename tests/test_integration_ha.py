@@ -60,7 +60,7 @@ def test_sensor_values(component, coordinator):
     values = {}
     for description in component.sensor.SENSORS:
         entity = component.sensor.NexBlueSensor(coordinator, description)
-        values[description.key] = entity.native_value
+        values[description.key] = _poll(entity)
         assert entity.unique_id == f"E2TEST0001_{description.key}"
         if description.options is not None and entity.native_value is not None:
             assert entity.native_value in description.options
@@ -143,21 +143,56 @@ def test_values_are_rounded(component, coordinator):
     assert by_key["max_current"].state_class is None
 
 
-def test_lifetime_energy_ignores_false_zero_and_drops(component, coordinator):
+def _poll(sensor, coordinator=None, **changes):
+    """One coordinator update: optionally change the data, then run the per-poll hook."""
     import dataclasses
 
+    if changes:
+        sensor.coordinator.data = dataclasses.replace(sensor.coordinator.data, **changes)
+    if sensor._guard is not None:
+        sensor._refresh_guarded_value()
+    return sensor.native_value
+
+
+def test_lifetime_energy_ignores_false_zero_and_drops(component, coordinator):
     by_key = {d.key: d for d in component.sensor.SENSORS}
     sensor = component.sensor.NexBlueSensor(coordinator, by_key["lifetime_energy"])
-    assert sensor.native_value == 1_040_975
-    for bad in (0, 1_000_000):
-        coordinator.data = dataclasses.replace(coordinator.data, lifetime_energy=bad)
-        assert sensor.native_value == 1_040_975
-    coordinator.data = dataclasses.replace(coordinator.data, lifetime_energy=1_041_500)
-    assert sensor.native_value == 1_041_500
-    # Session energy resets every session, so it must not be guarded.
+    assert _poll(sensor) == 1_040_975
+    for bad in (0, 1_000_000, 0, 0):
+        assert _poll(sensor, lifetime_energy=bad) == 1_040_975   # never accepted
+    assert _poll(sensor, lifetime_energy=1_041_500) == 1_041_500
+
+
+def test_session_energy_single_poll_dip_is_held(component, coordinator):
+    by_key = {d.key: d for d in component.sensor.SENSORS}
     session = component.sensor.NexBlueSensor(coordinator, by_key["session_energy"])
-    coordinator.data = dataclasses.replace(coordinator.data, session_energy=0.0)
-    assert session.native_value == 0.0
+    assert _poll(session) == 18.034
+    assert _poll(session, session_energy=0.0) == 18.034      # false 0, poll 1
+    assert _poll(session, session_energy=18.034) == 18.034   # back: the dip is forgotten
+    assert _poll(session, session_energy=0.0) == 18.034
+    assert _poll(session, session_energy=2.0) == 18.034      # 2 low polls, then a rise
+    assert _poll(session, session_energy=18.1) == 18.1
+    # Reading native_value repeatedly must not count as extra polls.
+    _poll(session, session_energy=0.0)
+    for _ in range(5):
+        assert session.native_value == 18.1
+
+
+def test_session_energy_three_poll_drop_is_accepted(component, coordinator):
+    by_key = {d.key: d for d in component.sensor.SENSORS}
+    session = component.sensor.NexBlueSensor(coordinator, by_key["session_energy"])
+    assert _poll(session) == 18.034
+    assert _poll(session, session_energy=0.0) == 18.034
+    assert _poll(session, session_energy=0.0) == 18.034
+    assert _poll(session, session_energy=0.01) == 0.01       # 3rd low poll: new session
+    assert _poll(session, session_energy=0.5) == 0.5         # rises pass immediately
+
+
+def test_session_energy_rise_passes_immediately(component, coordinator):
+    by_key = {d.key: d for d in component.sensor.SENSORS}
+    session = component.sensor.NexBlueSensor(coordinator, by_key["session_energy"])
+    assert _poll(session) == 18.034
+    assert _poll(session, session_energy=18.5) == 18.5
 
 
 def test_lifetime_energy_restores_last_value(component, coordinator):
@@ -180,8 +215,38 @@ def test_lifetime_energy_restores_last_value(component, coordinator):
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(component.sensor.RestoreSensor, "async_added_to_hass", lambda self: noop())
         asyncio.run(sensor.async_added_to_hass())
-    coordinator.data = dataclasses.replace(coordinator.data, lifetime_energy=0)
-    assert sensor.native_value == 1_040_975
+    assert sensor.native_value == 1_040_975                 # fixture value, first poll
+    assert _poll(sensor, lifetime_energy=0) == 1_040_975
+
+
+@pytest.mark.parametrize("stored, polls, expected", [
+    (25.5, [0.0], 25.5),                  # false 0 right after a restart is held
+    (25.5, [0.0, 0.0, 0.0], 0.0),         # a real new session still gets through
+    (25.5, [26.0], 26.0),
+])
+def test_session_energy_restores_last_value(component, coordinator, stored, polls, expected):
+    import asyncio
+    import dataclasses
+
+    from homeassistant.components.sensor import SensorExtraStoredData
+
+    by_key = {d.key: d for d in component.sensor.SENSORS}
+    sensor = component.sensor.NexBlueSensor(coordinator, by_key["session_energy"])
+    coordinator.data = dataclasses.replace(coordinator.data, session_energy=polls[0])
+
+    async def last_data():
+        return SensorExtraStoredData(native_value=stored, native_unit_of_measurement="kWh")
+
+    async def noop():
+        return None
+
+    sensor.async_get_last_sensor_data = last_data
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(component.sensor.RestoreSensor, "async_added_to_hass", lambda self: noop())
+        asyncio.run(sensor.async_added_to_hass())            # counts as the first poll
+    for value in polls[1:]:
+        _poll(sensor, session_energy=value)
+    assert sensor.native_value == expected
 
 
 @pytest.mark.parametrize("app_max, expected", [(20.0, 20.0), (32.0, 32.0), (40.0, 32.0),

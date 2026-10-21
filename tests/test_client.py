@@ -425,3 +425,16 @@ def test_keepalive_restores_setpoint_after_charger_reset(fake):
         return await client.poll(keepalive, 10)
 
     assert run(scenario()).current_limit == 10.0
+
+
+def test_confirmed_drop_guard():
+    guard = nb.ConfirmedDropGuard()
+    assert guard.filter(None) is None
+    assert guard.filter(18.0) == 18.0
+    assert guard.filter(0.0) == 18.0        # 1 low poll: held
+    assert guard.filter(18.0) == 18.0       # recovered: counter resets
+    assert guard.filter(0.0) == 18.0
+    assert guard.filter(0.0) == 18.0
+    assert guard.filter(0.2) == 0.2         # 3rd consecutive low poll: accepted
+    assert guard.filter(0.1) == 0.2         # a new dip is held again
+    assert guard.filter(0.4) == 0.4         # rises pass at once
