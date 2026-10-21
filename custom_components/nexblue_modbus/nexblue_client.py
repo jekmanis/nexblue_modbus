@@ -17,7 +17,7 @@ register 38-39).
 
 Only one TCP connection is ever open and every request goes through one lock: the
 charger (an ESP32) serves one Modbus TCP client at a time and resets any second
-connection. The Current Limit keepalive uses this same connection. After a transport error the socket is
+connection. The Current Limit keepalive and the IF_START write use this same connection. After a transport error the socket is
 closed and the next call reconnects; pymodbus' own reconnect loop is disabled so
 nothing retries in the background.
 """
@@ -49,6 +49,11 @@ REG_CURRENT_LIMIT = 1000
 CURRENT_LIMIT_MIN = 0.0
 CURRENT_LIMIT_MAX = 32.0
 
+# IF_START, holding 1006, UINT16: 0 STOP, 1 START. Has no effect while the charger is
+# controlled by OCPP. Only START is ever written.
+REG_IF_START = 1006
+IF_START_START = 1
+
 STATE_NAMES = {
     0: "available",
     1: "preparing",
@@ -60,6 +65,13 @@ STATE_NAMES = {
     7: "unavailable",
     8: "faulted",
 }
+
+STATE_PREPARING = 1
+
+# Charger states in which a car is plugged in (OCPP-style connector states).
+CAR_CONNECTED_STATES = frozenset({"preparing", "charging", "suspended_evse", "suspended_ev",
+                                  "finishing"})
+CAR_DISCONNECTED_STATES = frozenset({"available", "reserved", "unavailable", "faulted"})
 
 PHASE_MODE_NAMES = {
     0: "adaptive",
@@ -352,6 +364,10 @@ class NexBlueConnectionError(NexBlueError):
     """No usable TCP connection to the charger."""
 
 
+class NexBlueStateError(NexBlueError):
+    """The charger is not in a state that allows the request; nothing was written."""
+
+
 def _unit_keyword(method) -> str:
     """Name of the unit-id keyword: device_id (pymodbus >= 3.9), slave, or unit."""
     params = inspect.signature(method).parameters
@@ -463,7 +479,7 @@ class NexBlueClient:
     async def set_current_limit(self, amps: float) -> float:
         """Write Current Limit (holding 1000-1001, FLOAT32) and return the read-back value.
 
-        This is the only register the client writes.
+        Together with start_charging() (1006), the only registers the client writes.
         """
         amps = float(amps)
         if not CURRENT_LIMIT_MIN <= amps <= CURRENT_LIMIT_MAX:
@@ -473,4 +489,21 @@ class NexBlueClient:
             await self._call("write_registers", REG_CURRENT_LIMIT, values=encode_float32(amps))
             readback = decode_float32(await self._read("holding", REG_CURRENT_LIMIT, 2))
         _LOGGER.debug("current limit set to %.3f A (requested %.3f A)", readback, amps)
+        return readback
+
+    async def start_charging(self) -> int:
+        """Write IF_START = 1 (START, holding 1006) and return the read-back value.
+
+        Only allowed while the charger is ``preparing`` (car plugged in, not charging).
+        The state is read again under the lock just before the write; in any other state
+        NexBlueStateError is raised and nothing is written.
+        """
+        async with self._lock:
+            state = (await self._read("input", STATUS_START, 1))[0]
+            if state != STATE_PREPARING:
+                raise NexBlueStateError(
+                    f"charger state is {STATE_NAMES.get(state, state)}, start needs preparing")
+            await self._call("write_registers", REG_IF_START, values=[IF_START_START])
+            readback = (await self._read("holding", REG_IF_START, 1))[0]
+        _LOGGER.debug("IF_START written (START), read back %s", readback)
         return readback

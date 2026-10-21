@@ -278,6 +278,36 @@ def test_set_current_limit_rejects_out_of_range_without_io(fake, amps):
     assert FakeModbus.instances == []
 
 
+def _in_state(fake, state):
+    """A fake charger whose input 100 (State) reads ``state``."""
+    def factory(host, **kwargs):
+        client = fake(host, **kwargs)
+        client.dump["status"][0] = state
+        return client
+    return factory
+
+
+def test_start_charging_writes_start_to_1006_only(fake):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_in_state(fake, 1))  # preparing
+    assert run(client.start_charging()) == 1
+    assert FakeModbus.instances[0].writes == [(1006, [1])]
+
+
+@pytest.mark.parametrize("state", sorted(set(nb.STATE_NAMES) - {nb.STATE_PREPARING}))
+def test_start_charging_refused_unless_preparing(fake, state):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_in_state(fake, state))
+    with pytest.raises(nb.NexBlueStateError):
+        run(client.start_charging())
+    assert FakeModbus.instances[0].writes == []
+
+
+def test_car_connected_states_cover_every_state():
+    names = set(nb.STATE_NAMES.values())
+    assert nb.CAR_CONNECTED_STATES | nb.CAR_DISCONNECTED_STATES == names
+    assert not nb.CAR_CONNECTED_STATES & nb.CAR_DISCONNECTED_STATES
+    assert nb.STATE_NAMES[nb.STATE_PREPARING] == "preparing"
+
+
 def test_requests_are_serialised(fake):
     """A write issued during a poll must not interleave with the poll's reads."""
     client = nb.NexBlueClient("192.0.2.1", client_factory=fake)
