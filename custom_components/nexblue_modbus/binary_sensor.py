@@ -1,9 +1,11 @@
-"""Problem binary sensors for the error and warning bitsets (input 400, 401)."""
+"""Binary sensors: car connected (from State, input 100) and the error/warning bitsets
+(input 400, 401)."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -16,26 +18,47 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import NexBlueConfigEntry, NexBlueCoordinator
 from .entity import NexBlueEntity
-from .nexblue_client import ERROR_BITS, WARNING_BITS, ChargerData, active_bits
+from .nexblue_client import (
+    CAR_CONNECTED_STATES,
+    CAR_DISCONNECTED_STATES,
+    ERROR_BITS,
+    WARNING_BITS,
+    ChargerData,
+    active_bits,
+)
 
 PARALLEL_UPDATES = 0
 
 
 @dataclass(frozen=True, kw_only=True)
 class NexBlueBinaryDescription(BinarySensorEntityDescription):
-    bits_fn: Callable[[ChargerData], int]
-    labels: dict[int, str]
+    is_on_fn: Callable[[ChargerData], bool | None]
+    attrs_fn: Callable[[ChargerData], dict[str, Any]] | None = None
+
+
+def car_connected(data: ChargerData) -> bool | None:
+    """On while a car is plugged in; None (unknown) for an undocumented state."""
+    if data.state_name in CAR_CONNECTED_STATES:
+        return True
+    if data.state_name in CAR_DISCONNECTED_STATES:
+        return False
+    return None
+
+
+def _bitset(key: str, bits_fn: Callable[[ChargerData], int],
+            labels: dict[int, str]) -> NexBlueBinaryDescription:
+    return NexBlueBinaryDescription(
+        key=key, translation_key=key, device_class=BinarySensorDeviceClass.PROBLEM,
+        entity_category=EntityCategory.DIAGNOSTIC, is_on_fn=lambda d: bits_fn(d) != 0,
+        attrs_fn=lambda d: {"active": active_bits(bits_fn(d), labels)})
 
 
 BINARY_SENSORS: tuple[NexBlueBinaryDescription, ...] = (
     NexBlueBinaryDescription(
-        key="error", translation_key="error", device_class=BinarySensorDeviceClass.PROBLEM,
-        entity_category=EntityCategory.DIAGNOSTIC, bits_fn=lambda d: d.error_bits,
-        labels=ERROR_BITS),
-    NexBlueBinaryDescription(
-        key="warning", translation_key="warning", device_class=BinarySensorDeviceClass.PROBLEM,
-        entity_category=EntityCategory.DIAGNOSTIC, bits_fn=lambda d: d.warning_bits,
-        labels=WARNING_BITS),
+        key="car_connected", translation_key="car_connected",
+        device_class=BinarySensorDeviceClass.PLUG, is_on_fn=car_connected),
+    _bitset("error", lambda d: d.error_bits, ERROR_BITS),
+    _bitset("warning", lambda d: d.warning_bits, WARNING_BITS),
 )
 
 
@@ -54,10 +77,15 @@ class NexBlueBinarySensor(NexBlueEntity, BinarySensorEntity):
         self.entity_description = description
 
     @property
-    def is_on(self) -> bool:
-        return self.entity_description.bits_fn(self.coordinator.data) != 0
+    def available(self) -> bool:
+        return super().available and self.coordinator.data is not None
 
     @property
-    def extra_state_attributes(self) -> dict[str, list[str]]:
-        bits = self.entity_description.bits_fn(self.coordinator.data)
-        return {"active": active_bits(bits, self.entity_description.labels)}
+    def is_on(self) -> bool | None:
+        return self.entity_description.is_on_fn(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(self.coordinator.data)

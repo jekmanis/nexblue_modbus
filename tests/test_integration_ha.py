@@ -108,12 +108,12 @@ def test_bitset_attributes(component, coordinator):
 def test_binary_sensors(component, coordinator):
     import dataclasses
 
-    states = {d.key: component.binary_sensor.NexBlueBinarySensor(coordinator, d).is_on
-              for d in component.binary_sensor.BINARY_SENSORS}
-    assert states == {"error": False, "warning": False}
+    by_key = {d.key: d for d in component.binary_sensor.BINARY_SENSORS}
+    states = {key: component.binary_sensor.NexBlueBinarySensor(coordinator, d).is_on
+              for key, d in by_key.items()}
+    assert states == {"car_connected": False, "error": False, "warning": False}
     coordinator.data = dataclasses.replace(coordinator.data, error_bits=0b100000)
-    error = component.binary_sensor.NexBlueBinarySensor(
-        coordinator, component.binary_sensor.BINARY_SENSORS[0])
+    error = component.binary_sensor.NexBlueBinarySensor(coordinator, by_key["error"])
     assert error.is_on
     assert error.extra_state_attributes == {"active": ["Relay stuck"]}
 
@@ -395,3 +395,42 @@ def test_start_button_write_failure_is_a_ha_error(component, coordinator):
     coordinator.fail_writes = component.button.NexBlueError("charger unreachable")
     with pytest.raises(HomeAssistantError, match="charger unreachable"):
         _press(component, coordinator, "preparing")
+
+
+# --------------------------------------------------------------------------
+# Car connected
+# --------------------------------------------------------------------------
+
+def _car_connected(component, coordinator):
+    by_key = {d.key: d for d in component.binary_sensor.BINARY_SENSORS}
+    return component.binary_sensor.NexBlueBinarySensor(coordinator, by_key["car_connected"])
+
+
+@pytest.mark.parametrize("code, name", sorted(nb.STATE_NAMES.items()))
+def test_car_connected_for_every_state(component, coordinator, code, name):
+    import dataclasses
+
+    from homeassistant.components.binary_sensor import BinarySensorDeviceClass
+
+    expected = name in {"preparing", "charging", "suspended_evse", "suspended_ev", "finishing"}
+    assert expected or name in {"available", "reserved", "unavailable", "faulted"}
+    coordinator.data = dataclasses.replace(coordinator.data, state=code)
+    sensor = _car_connected(component, coordinator)
+    assert sensor.device_class is BinarySensorDeviceClass.PLUG
+    assert sensor.unique_id == "E2TEST0001_car_connected"
+    assert sensor.available
+    assert sensor.is_on is expected
+    assert sensor.extra_state_attributes is None
+
+
+def test_car_connected_unknown_for_undocumented_state(component, coordinator):
+    import dataclasses
+
+    coordinator.data = dataclasses.replace(coordinator.data, state=42)
+    assert _car_connected(component, coordinator).is_on is None
+
+
+def test_binary_sensors_unavailable_without_data(component, coordinator):
+    coordinator.data = None
+    for description in component.binary_sensor.BINARY_SENSORS:
+        assert not component.binary_sensor.NexBlueBinarySensor(coordinator, description).available

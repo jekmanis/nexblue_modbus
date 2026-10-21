@@ -37,6 +37,9 @@
   },
   "entity": {
     "binary_sensor": {
+      "car_connected": {
+        "name": "Car connected"
+      },
       "error": {
         "name": "Error"
       },
