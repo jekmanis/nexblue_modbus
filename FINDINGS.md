@@ -68,3 +68,7 @@ IP adreses, hostname un sērijas numurs publiskajai versijai aizstāti ar piemē
   Fallback Limit -1 = nav iestatīts) – lasīšana neskaitās Modbus heartbeat. Tāpēc integrācija pēc Current Limit iestatīšanas
   to periodiski pārraksta (keepalive, skat. README). Pārbaudīts dzīvē: pēc 16 A ieraksta no HA bit6 nodzisa
   uzreiz un palika 0 ~380 s (ilgāk par 300 s timeout) – ieraksts skaitās heartbeat, keepalive strādā. Ietekme uz reālu lādēšanas sesiju nav pārbaudīta (auto nebija pieslēgts).
+- **Waiting bit7 = "Phase switching"** (oficiālā dokumentācija: "Phase switching — the charger is switching phases";
+  biti 8–15 rezervēti). Redzēts dzīvē 2026-10-21 lādēšanas laikā (Phase mode adaptive, auto lādē vienfāzes uz L1):
+  charging -> suspended_evse ar Waiting 128 (bit7) un jaudu 0 uz ~9 s -> atkal charging -> pēc ~20 s finishing.
+  Integrācija bit7 tagad rāda kā "Phase switching".

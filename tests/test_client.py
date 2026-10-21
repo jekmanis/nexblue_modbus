@@ -44,6 +44,8 @@ def test_float32_round_trip(value):
 def test_active_bits_labels_and_undocumented():
     assert nb.active_bits(0, nb.ERROR_BITS) == []
     assert nb.active_bits(0x0040, nb.WAITING_BITS) == ["Fallback triggered by Modbus"]
+    assert nb.active_bits(0x0080, nb.WAITING_BITS) == ["Phase switching"]   # seen live, 128
+    assert nb.active_bits(0x0100, nb.WAITING_BITS) == ["bit 8"]             # 8-15 reserved
     assert nb.active_bits(0x8001, nb.ERROR_BITS) == ["CP voltage abnormal", "bit 15"]
 
 

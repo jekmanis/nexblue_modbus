@@ -116,6 +116,7 @@ WAITING_BITS = {
     4: "First request sent but host has not responded",
     5: "Load shedding protection active",
     6: "Fallback triggered by Modbus",
+    7: "Phase switching",
 }
 
 
