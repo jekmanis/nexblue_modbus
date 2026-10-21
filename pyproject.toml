@@ -1,0 +1,16 @@
+[project]
+name = "nexblue"
+version = "0.1.0"
+description = "Home Assistant integration for NexBlue EV chargers over local Modbus TCP"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mac-vendor-lookup>=0.1.15",
+    "pymodbus==3.13.1",
+    "zeroconf>=0.151.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

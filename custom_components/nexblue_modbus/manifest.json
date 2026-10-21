@@ -1,0 +1,14 @@
+{
+  "domain": "nexblue_modbus",
+  "name": "NexBlue Modbus TCP",
+  "codeowners": ["@jekmanis"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/jekmanis/nexblue_modbus",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/jekmanis/nexblue_modbus/issues",
+  "loggers": ["pymodbus"],
+  "requirements": ["pymodbus>=3.9.0"],
+  "version": "0.1.0"
+}

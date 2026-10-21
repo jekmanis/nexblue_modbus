@@ -1,0 +1,134 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "NexBlue charger (Modbus TCP)",
+        "description": "Enable 'Modbus TCP' in the NexBlue app first (charger settings, firmware 03.09.88 or later).",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "unit_id": "Modbus unit ID",
+          "scan_interval": "Scan interval (seconds)"
+        },
+        "data_description": {
+          "host": "IP address or hostname of the charger.",
+          "unit_id": "Set in the NexBlue app, 200 by default.",
+          "scan_interval": "10 seconds or more. The charger serves few Modbus clients."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the charger. Check the host and that Modbus TCP is enabled in the NexBlue app.",
+      "read_failed": "The charger answered but refused the read. Check the unit ID."
+    },
+    "abort": {
+      "already_configured": "This charger is already configured.",
+      "no_serial": "The charger reported no serial number, so it can't be told apart from other chargers."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Scan interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "error": {
+        "name": "Error"
+      },
+      "warning": {
+        "name": "Warning"
+      }
+    },
+    "number": {
+      "current_limit": {
+        "name": "Current limit"
+      }
+    },
+    "sensor": {
+      "state": {
+        "name": "State",
+        "state": {
+          "available": "Available",
+          "preparing": "Preparing",
+          "charging": "Charging",
+          "suspended_evse": "Suspended by charger",
+          "suspended_ev": "Suspended by vehicle",
+          "finishing": "Finishing",
+          "reserved": "Reserved",
+          "unavailable": "Unavailable",
+          "faulted": "Faulted"
+        }
+      },
+      "current_l1": {
+        "name": "Current L1"
+      },
+      "current_l2": {
+        "name": "Current L2"
+      },
+      "current_l3": {
+        "name": "Current L3"
+      },
+      "voltage_l1": {
+        "name": "Voltage L1"
+      },
+      "voltage_l2": {
+        "name": "Voltage L2"
+      },
+      "voltage_l3": {
+        "name": "Voltage L3"
+      },
+      "power_l1": {
+        "name": "Power L1"
+      },
+      "power_l2": {
+        "name": "Power L2"
+      },
+      "power_l3": {
+        "name": "Power L3"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "session_energy": {
+        "name": "Session energy"
+      },
+      "lifetime_energy": {
+        "name": "Lifetime energy"
+      },
+      "max_current": {
+        "name": "Max current"
+      },
+      "fallback_current": {
+        "name": "Fallback current"
+      },
+      "phase_mode": {
+        "name": "Phase mode",
+        "state": {
+          "adaptive": "Adaptive",
+          "single_phase": "Single phase",
+          "three_phase": "Three phase"
+        }
+      },
+      "error_code": {
+        "name": "Error code"
+      },
+      "warning_code": {
+        "name": "Warning code"
+      },
+      "waiting_code": {
+        "name": "Waiting code"
+      },
+      "modbus_fallback_limit": {
+        "name": "Modbus fallback limit"
+      },
+      "modbus_fallback_timeout": {
+        "name": "Modbus fallback timeout"
+      }
+    }
+  }
+}
