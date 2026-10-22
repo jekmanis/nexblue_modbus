@@ -1,6 +1,7 @@
 {
   "domain": "nexblue_modbus",
   "name": "NexBlue Modbus TCP",
+  "categories": ["energy.ev_charging"],
   "codeowners": ["@jekmanis"],
   "config_flow": true,
   "dependencies": [],

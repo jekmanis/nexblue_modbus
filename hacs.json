@@ -1,5 +1,4 @@
 {
   "name": "NexBlue Modbus TCP",
-  "homeassistant": "2026.10.0",
-  "render_readme": true
+  "homeassistant": "2026.10.0"
 }

@@ -37,6 +37,31 @@ def test_manifest():
     assert tuple(map(int, minimum.split("."))) <= (3, 13, 1)
 
 
+def test_manifest_is_marketplace_ready():
+    manifest = json.loads((COMPONENT_DIR / "manifest.json").read_text(encoding="utf-8"))
+    keys = list(manifest)
+    assert keys[:2] == ["domain", "name"]
+    assert keys[2:] == sorted(keys[2:]), "hassfest wants domain, name, then alphabetical"
+    for key in ("codeowners", "documentation", "issue_tracker", "version", "integration_type"):
+        assert manifest[key], key
+    assert manifest["integration_type"] == "device"
+    assert 1 <= len(manifest["categories"]) <= 3
+    assert len(set(manifest["categories"])) == len(manifest["categories"])
+
+
+def test_hacs_json():
+    """Only keys from the Marketplace hacs.json reference, with the documented types."""
+    hacs = json.loads((REPO_ROOT / "hacs.json").read_text(encoding="utf-8"))
+    types = {"name": str, "content_in_root": bool, "filename": str, "zip_release": bool,
+             "persistent_directory": str, "homeassistant": str, "hide_default_branch": bool,
+             "hacs": str, "country": (str, list)}
+    assert hacs["name"]
+    for key, value in hacs.items():
+        assert key in types, f"undocumented hacs.json key {key}"
+        assert isinstance(value, types[key]), key
+    assert re.fullmatch(r"\d{4}\.\d{1,2}\.\d+", hacs["homeassistant"])
+
+
 def test_translations_match_strings():
     strings = json.loads((COMPONENT_DIR / "strings.json").read_text(encoding="utf-8"))
     english = json.loads((COMPONENT_DIR / "translations" / "en.json").read_text(encoding="utf-8"))
