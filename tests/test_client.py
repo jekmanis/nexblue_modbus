@@ -303,6 +303,175 @@ def test_start_charging_refused_unless_preparing(fake, state):
     assert FakeModbus.instances[0].writes == []
 
 
+@pytest.mark.parametrize("code, name", sorted(nb.STATE_NAMES.items()))
+def test_stop_charging_only_while_charging_or_suspended(fake, code, name):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_in_state(fake, code))
+    if name in {"charging", "suspended_evse", "suspended_ev"}:
+        assert run(client.stop_charging()) == 0
+        assert FakeModbus.instances[0].writes == [(1006, [0])]
+    else:
+        with pytest.raises(nb.NexBlueStateError, match=name):
+            run(client.stop_charging())
+        assert FakeModbus.instances[0].writes == []
+
+
+def _phase(fake, mode):
+    """A fake charger whose input 138 (Phase charging) reads ``mode``."""
+    def factory(host, **kwargs):
+        client = fake(host, **kwargs)
+        client.dump["status"][138 - 100] = mode
+        return client
+    return factory
+
+
+def test_phase_mode_encoding_matches_the_vendor_document():
+    # Input 138 and holding 1007: 0 Adaptive, 1 Force Single Phase, 2 Force Three Phase.
+    assert nb.PHASE_MODE_NAMES == {0: "adaptive", 1: "single_phase", 2: "three_phase"}
+    assert (nb.REG_PHASE_CHARGING, nb.REG_PHASE_MODE) == (138, 1007)
+
+
+def test_set_phase_mode_writes_a_real_change_after_the_check(fake):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_phase(fake, 0))
+    order = []
+    assert run(client.set_phase_mode(1, before_write=lambda: order.append("check"))) is True
+    assert order == ["check"]
+    assert FakeModbus.instances[0].writes == [(1007, [1])]
+
+
+def test_set_phase_mode_same_mode_writes_nothing_and_skips_the_check(fake):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_phase(fake, 2))
+    called = []
+    assert run(client.set_phase_mode(2, before_write=lambda: called.append(1))) is False
+    assert called == []
+    assert FakeModbus.instances[0].writes == []
+
+
+def test_set_phase_mode_limiter_refusal_writes_nothing(fake):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=_phase(fake, 0))
+
+    def refuse():
+        raise nb.PhaseSwitchLimitError("too soon")
+
+    with pytest.raises(nb.PhaseSwitchLimitError):
+        run(client.set_phase_mode(2, before_write=refuse))
+    assert FakeModbus.instances[0].writes == []
+
+
+@pytest.mark.parametrize("mode", [-1, 3, 7])
+def test_set_phase_mode_rejects_unknown_modes_without_io(fake, mode):
+    client = nb.NexBlueClient("192.0.2.1", client_factory=fake)
+    with pytest.raises(nb.NexBlueError):
+        run(client.set_phase_mode(mode))
+    assert FakeModbus.instances == []
+
+
+def test_every_write_stays_in_scope(fake):
+    """All write paths, in every state and phase mode: only 1000-1001, 1006 in {0, 1},
+    1007 in {0, 1, 2}. Never 1002-1005."""
+    seen = []
+    for state in nb.STATE_NAMES:
+        for phase in nb.PHASE_MODE_NAMES:
+            def factory(host, state=state, phase=phase, **kwargs):
+                client = fake(host, **kwargs)
+                client.dump["status"][0] = state
+                client.dump["status"][138 - 100] = phase
+                return client
+            client = nb.NexBlueClient("192.0.2.1", client_factory=factory)
+            calls = [client.set_current_limit(10), client.start_charging(),
+                     client.stop_charging()] + [client.set_phase_mode(m) for m in nb.PHASE_MODE_NAMES]
+            for call in calls:
+                try:
+                    run(call)
+                except nb.NexBlueStateError:
+                    pass
+            seen += FakeModbus.instances[-1].writes
+    for address, values in seen:
+        assert (address == 1000 and len(values) == 2
+                or address == 1006 and values in ([0], [1])
+                or address == 1007 and values in ([0], [1], [2])), (address, values)
+    assert {a for a, _ in seen} == {1000, 1006, 1007}
+
+
+class WallClock:
+    def __init__(self, now=1_760_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_limiter_min_interval_10_min():
+    clock = WallClock()
+    limiter = nb.PhaseSwitchLimiter(clock)
+    limiter.check(clock.now)
+    limiter.record(clock.now)
+    clock.now += 599
+    with pytest.raises(nb.PhaseSwitchLimitError, match="10 min"):
+        limiter.check(clock.now)
+    clock.now += 1
+    limiter.check(clock.now)
+
+
+def test_limiter_max_2_per_rolling_hour():
+    clock = WallClock()
+    limiter = nb.PhaseSwitchLimiter(clock)
+    limiter.record(clock.now)
+    clock.now += 600
+    limiter.record(clock.now)
+    clock.now += 600                     # 20 min after the first, 10 after the second
+    with pytest.raises(nb.PhaseSwitchLimitError, match="per hour"):
+        limiter.check(clock.now)
+    clock.now += 2399                    # 1 s before the first leaves the window
+    with pytest.raises(nb.PhaseSwitchLimitError, match="per hour"):
+        limiter.check(clock.now)
+    clock.now += 1
+    limiter.check(clock.now)
+
+
+def test_limiter_max_6_per_session_and_reset_when_car_unplugged():
+    clock = WallClock()
+    limiter = nb.PhaseSwitchLimiter(clock)
+    for _ in range(6):
+        limiter.check(clock.now)
+        limiter.record(clock.now)
+        clock.now += 1800                # spaced so the other two limits never bite
+        limiter.observe("charging")
+    with pytest.raises(nb.PhaseSwitchLimitError, match="session"):
+        limiter.check(clock.now)
+    limiter.observe("suspended_ev")      # still the same session
+    with pytest.raises(nb.PhaseSwitchLimitError, match="session"):
+        limiter.check(clock.now)
+    limiter.observe("available")         # car unplugged: new session
+    assert limiter.session_switches == 0
+    limiter.check(clock.now)
+
+
+@pytest.mark.parametrize("state", sorted(nb.STATE_NAMES.values()))
+def test_limiter_session_resets_only_without_a_car(state):
+    limiter = nb.PhaseSwitchLimiter(WallClock())
+    limiter.session_switches = 4
+    limiter.observe(state)
+    assert limiter.session_switches == (0 if state in nb.CAR_DISCONNECTED_STATES else 4)
+
+
+def test_limiter_state_round_trips_and_rejects_garbage():
+    clock = WallClock()
+    limiter = nb.PhaseSwitchLimiter(clock)
+    limiter.record(clock.now)
+    stored = limiter.as_dict()
+    restored = nb.PhaseSwitchLimiter(clock)
+    assert restored.restore(stored)
+    assert restored.as_dict() == stored
+    clock.now += 60
+    with pytest.raises(nb.PhaseSwitchLimitError):
+        restored.check(clock.now)            # a restart doesn't reset the limiter
+    for bad in ({}, {"switches": "x", "session_switches": 1},
+                {"switches": [], "session_switches": -1}, {"switches": None, "session_switches": 0}):
+        fresh = nb.PhaseSwitchLimiter(clock)
+        assert not fresh.restore(bad)
+        assert fresh.as_dict() == {"switches": [], "session_switches": 0}
+
+
 def test_car_connected_states_cover_every_state():
     names = set(nb.STATE_NAMES.values())
     assert nb.CAR_CONNECTED_STATES | nb.CAR_DISCONNECTED_STATES == names

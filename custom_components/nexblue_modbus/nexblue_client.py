@@ -17,7 +17,8 @@ register 38-39).
 
 Only one TCP connection is ever open and every request goes through one lock: the
 charger (an ESP32) serves one Modbus TCP client at a time and resets any second
-connection. The Current Limit keepalive and the IF_START write use this same connection. After a transport error the socket is
+connection. The Current Limit keepalive, IF_START and phase-mode writes use this same
+connection. After a transport error the socket is
 closed and the next call reconnects; pymodbus' own reconnect loop is disabled so
 nothing retries in the background.
 """
@@ -28,6 +29,7 @@ import asyncio
 import dataclasses
 import inspect
 import logging
+import math
 import struct
 import time
 from dataclasses import dataclass
@@ -50,9 +52,16 @@ CURRENT_LIMIT_MIN = 0.0
 CURRENT_LIMIT_MAX = 32.0
 
 # IF_START, holding 1006, UINT16: 0 STOP, 1 START. Has no effect while the charger is
-# controlled by OCPP. Only START is ever written.
+# controlled by OCPP.
 REG_IF_START = 1006
+IF_START_STOP = 0
 IF_START_START = 1
+
+# Phase charging (input 138, RO) and Runtime Phase Mode (holding 1007, RW) share one
+# encoding, see PHASE_MODE_NAMES. NexBlue: at least 10 min between phase switches, at
+# most 2 in any hour and 6 per charging session (enforced by PhaseSwitchLimiter).
+REG_PHASE_CHARGING = 138
+REG_PHASE_MODE = 1007
 
 STATE_NAMES = {
     0: "available",
@@ -67,6 +76,11 @@ STATE_NAMES = {
 }
 
 STATE_PREPARING = 1
+
+# States in which IF_START may be written: START only while a car waits, STOP only while a
+# session is charging or suspended.
+START_ALLOWED_STATES = frozenset({"preparing"})
+STOP_ALLOWED_STATES = frozenset({"charging", "suspended_evse", "suspended_ev"})
 
 # Charger states in which a car is plugged in (OCPP-style connector states).
 CAR_CONNECTED_STATES = frozenset({"preparing", "charging", "suspended_evse", "suspended_ev",
@@ -253,6 +267,78 @@ class ConfirmedDropGuard:
         return self.last
 
 
+PHASE_SWITCH_MIN_INTERVAL = 600     # s between two switches
+PHASE_SWITCH_WINDOW = 3600          # s, rolling window ...
+PHASE_SWITCH_MAX_PER_WINDOW = 2     # ... with at most this many switches
+PHASE_SWITCH_MAX_PER_SESSION = 6
+
+
+class PhaseSwitchLimiter:
+    """NexBlue's phase-switching limits, for switches this integration makes.
+
+    At least 10 min between switches, at most 2 in any rolling 60 min, at most 6 per
+    charging session. Times are wall-clock UTC seconds (``time.time``) so they can be
+    stored and survive an HA restart. The session count resets whenever the charger
+    reports no car connected; switches made from the app or portal aren't seen.
+    """
+
+    def __init__(self, clock=time.time) -> None:
+        self._clock = clock
+        self.switches: list[float] = []   # UTC timestamps within the last window
+        self.session_switches = 0
+
+    def now(self) -> float:
+        return self._clock()
+
+    def observe(self, state_name: str | None) -> None:
+        """Called once per poll: a disconnected car ends the session."""
+        if state_name in CAR_DISCONNECTED_STATES:
+            self.session_switches = 0
+
+    def _prune(self, now: float) -> None:
+        self.switches = [t for t in self.switches if now - t < PHASE_SWITCH_WINDOW]
+
+    def check(self, now: float) -> None:
+        """Raise PhaseSwitchLimitError if a switch at ``now`` would break a limit."""
+        self._prune(now)
+        if self.switches:
+            since = now - max(self.switches)
+            if since < PHASE_SWITCH_MIN_INTERVAL:
+                wait = max(1, math.ceil((PHASE_SWITCH_MIN_INTERVAL - since) / 60))
+                raise PhaseSwitchLimitError(
+                    f"the last phase switch was {max(0, int(since // 60))} min ago; NexBlue "
+                    f"allows one every 10 min at most. Try again in {wait} min")
+        if len(self.switches) >= PHASE_SWITCH_MAX_PER_WINDOW:
+            wait = max(1, math.ceil((min(self.switches) + PHASE_SWITCH_WINDOW - now) / 60))
+            raise PhaseSwitchLimitError(
+                f"{len(self.switches)} phase switches in the last hour; NexBlue allows "
+                f"{PHASE_SWITCH_MAX_PER_WINDOW} per hour. Try again in {wait} min")
+        if self.session_switches >= PHASE_SWITCH_MAX_PER_SESSION:
+            raise PhaseSwitchLimitError(
+                f"{self.session_switches} phase switches in this charging session; NexBlue "
+                f"allows {PHASE_SWITCH_MAX_PER_SESSION}. Unplug the car to start a new session")
+
+    def record(self, now: float) -> None:
+        self._prune(now)
+        self.switches.append(now)
+        self.session_switches += 1
+
+    def as_dict(self) -> dict:
+        return {"switches": list(self.switches), "session_switches": self.session_switches}
+
+    def restore(self, data: dict) -> bool:
+        """Load stored state; False (and nothing changed) if it is malformed."""
+        try:
+            switches = [float(t) for t in data["switches"]]
+            session = int(data["session_switches"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if session < 0:
+            return False
+        self.switches, self.session_switches = switches, session
+        return True
+
+
 @dataclass(frozen=True)
 class DeviceInfo:
     brand: str
@@ -369,6 +455,10 @@ class NexBlueStateError(NexBlueError):
     """The charger is not in a state that allows the request; nothing was written."""
 
 
+class PhaseSwitchLimitError(NexBlueError):
+    """A phase switch now would break NexBlue's switching limits; nothing was written."""
+
+
 def _unit_keyword(method) -> str:
     """Name of the unit-id keyword: device_id (pymodbus >= 3.9), slave, or unit."""
     params = inspect.signature(method).parameters
@@ -480,7 +570,8 @@ class NexBlueClient:
     async def set_current_limit(self, amps: float) -> float:
         """Write Current Limit (holding 1000-1001, FLOAT32) and return the read-back value.
 
-        Together with start_charging() (1006), the only registers the client writes.
+        With start_charging()/stop_charging() (1006) and set_phase_mode() (1007), the
+        only registers the client writes.
         """
         amps = float(amps)
         if not CURRENT_LIMIT_MIN <= amps <= CURRENT_LIMIT_MAX:
@@ -496,15 +587,51 @@ class NexBlueClient:
         """Write IF_START = 1 (START, holding 1006) and return the read-back value.
 
         Only allowed while the charger is ``preparing`` (car plugged in, not charging).
-        The state is read again under the lock just before the write; in any other state
-        NexBlueStateError is raised and nothing is written.
         """
+        return await self._write_if_start(IF_START_START, START_ALLOWED_STATES)
+
+    async def stop_charging(self) -> int:
+        """Write IF_START = 0 (STOP, holding 1006) and return the read-back value.
+
+        Only allowed while the charger is charging, suspended_evse or suspended_ev. The
+        current limit and its keepalive are not touched.
+        """
+        return await self._write_if_start(IF_START_STOP, STOP_ALLOWED_STATES)
+
+    async def _write_if_start(self, value: int, allowed: frozenset[str]) -> int:
+        """The state is read again under the lock just before the write; in any state
+        outside ``allowed`` NexBlueStateError is raised and nothing is written."""
+        if value not in (IF_START_STOP, IF_START_START):
+            raise NexBlueError(f"IF_START must be 0 or 1, got {value}")
+        command = "start" if value == IF_START_START else "stop"
         async with self._lock:
             state = (await self._read("input", STATUS_START, 1))[0]
-            if state != STATE_PREPARING:
+            name = STATE_NAMES.get(state, state)
+            if name not in allowed:
                 raise NexBlueStateError(
-                    f"charger state is {STATE_NAMES.get(state, state)}, start needs preparing")
-            await self._call("write_registers", REG_IF_START, values=[IF_START_START])
+                    f"charger state is {name}, {command} needs {' or '.join(sorted(allowed))}")
+            await self._call("write_registers", REG_IF_START, values=[value])
             readback = (await self._read("holding", REG_IF_START, 1))[0]
-        _LOGGER.debug("IF_START written (START), read back %s", readback)
+        _LOGGER.debug("IF_START written (%s), read back %s", command.upper(), readback)
         return readback
+
+    async def set_phase_mode(self, mode: int, before_write=None) -> bool:
+        """Write Runtime Phase Mode (holding 1007) if it is a real change.
+
+        Under the lock, Phase charging (input 138) is read again: if it already is
+        ``mode`` nothing is written and False is returned. Otherwise ``before_write()``
+        runs (the limiter, which may raise) and then the write; returns True.
+        """
+        if mode not in PHASE_MODE_NAMES:
+            raise NexBlueError(f"phase mode must be one of {sorted(PHASE_MODE_NAMES)}, got {mode}")
+        async with self._lock:
+            current = (await self._read("input", REG_PHASE_CHARGING, 1))[0]
+            if current == mode:
+                _LOGGER.debug("phase mode already %s; nothing written", PHASE_MODE_NAMES[mode])
+                return False
+            if before_write is not None:
+                before_write()
+            await self._call("write_registers", REG_PHASE_MODE, values=[mode])
+        _LOGGER.debug("phase mode %s -> %s written", PHASE_MODE_NAMES.get(current, current),
+                      PHASE_MODE_NAMES[mode])
+        return True

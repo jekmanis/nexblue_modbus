@@ -117,22 +117,20 @@ def test_config_flow_fields_have_labels():
         assert reason in strings["config"]["abort"]
 
 
-def test_only_the_client_talks_modbus_and_only_writes_1000_and_1006():
-    """Current Limit (1000-1001) and IF_START (1006, START only) are the whole write scope.
+def test_only_the_client_talks_modbus_and_writes_only_its_scope():
+    """Current Limit (1000-1001), IF_START (1006) and Runtime Phase Mode (1007).
 
-    Fallback limit/timeout (1002-1005) and phase mode (1007) change charging behaviour
-    and are out of scope.
+    Fallback limit/timeout (1002-1005) change charging behaviour and are out of scope.
+    The values written to 1006 and 1007 are checked in test_client.py.
     """
     for path in SOURCES:
         source = path.read_text(encoding="utf-8")
         if path.name == "nexblue_client.py":
             calls = re.findall(r'_call\("write_\w+", (\w+)', source)
-            assert calls == ["REG_CURRENT_LIMIT", "REG_IF_START"]
-            assert re.findall(r"values=\[(\w+)\]", source) == ["IF_START_START"]
-            assert (nb.REG_CURRENT_LIMIT, nb.REG_IF_START, nb.IF_START_START) == (1000, 1006, 1)
-            assert not {1002, 1003, 1004, 1005, 1007} & {nb.REG_CURRENT_LIMIT,
-                                                         nb.REG_CURRENT_LIMIT + 1,
-                                                         nb.REG_IF_START}
+            assert calls == ["REG_CURRENT_LIMIT", "REG_IF_START", "REG_PHASE_MODE"]
+            assert re.findall(r"values=\[(\w+)\]", source) == ["value", "mode"]
+            assert (nb.REG_CURRENT_LIMIT, nb.REG_IF_START, nb.REG_PHASE_MODE) == (1000, 1006, 1007)
+            assert (nb.IF_START_STOP, nb.IF_START_START) == (0, 1)
         else:
             assert "pymodbus" not in source, f"{path.name} must go through nexblue_client"
             assert "write_register" not in source, path.name
