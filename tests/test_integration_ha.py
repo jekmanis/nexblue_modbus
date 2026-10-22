@@ -29,7 +29,7 @@ def component():
     sys.modules.setdefault("custom_components", parent)
     modules = {name: importlib.import_module(f"custom_components.nexblue_modbus.{name}")
                for name in ("config_flow", "coordinator", "sensor", "binary_sensor", "number",
-                            "button")}
+                            "button", "select", "nexblue_client")}
     importlib.import_module("custom_components.nexblue_modbus")
     return types.SimpleNamespace(**modules)
 
@@ -44,6 +44,7 @@ class _Coordinator:
         self.last_update_success = True
         self.written = []
         self.starts = 0
+        self.stops = 0
         self.keepalive = nb.CurrentLimitKeepalive()
         self.fail_writes: Exception | None = None
 
@@ -61,6 +62,11 @@ class _Coordinator:
         if self.fail_writes is not None:
             raise self.fail_writes
         self.starts += 1
+
+    async def async_stop_charging(self):
+        if self.fail_writes is not None:
+            raise self.fail_writes
+        self.stops += 1
 
 
 @pytest.fixture
@@ -353,22 +359,26 @@ def test_restore_write_failure_is_a_warning_not_a_crash(component, coordinator, 
 # Start charging button
 # --------------------------------------------------------------------------
 
-def _press(component, coordinator, state=None):
+def _button(component, coordinator, key):
+    by_key = {d.key: d for d in component.button.BUTTONS}
+    return component.button.NexBlueChargeButton(coordinator, by_key[key])
+
+
+def _press(component, coordinator, state=None, key="start_charging"):
     import asyncio
     import dataclasses
 
     if state is not None:
         code = next(c for c, n in nb.STATE_NAMES.items() if n == state)
         coordinator.data = dataclasses.replace(coordinator.data, state=code)
-    button = component.button.NexBlueStartCharging(coordinator)
-    asyncio.run(button.async_press())
+    asyncio.run(_button(component, coordinator, key).async_press())
 
 
 def test_start_button_starts_when_preparing(component, coordinator):
-    button = component.button.NexBlueStartCharging(coordinator)
+    button = _button(component, coordinator, "start_charging")
     assert button.unique_id == "E2TEST0001_start_charging"
     _press(component, coordinator, "preparing")
-    assert coordinator.starts == 1
+    assert (coordinator.starts, coordinator.stops) == (1, 0)
 
 
 @pytest.mark.parametrize("state", sorted(set(nb.STATE_NAMES.values()) - {"preparing"}))
@@ -380,21 +390,40 @@ def test_start_button_refused_in_any_other_state(component, coordinator, state):
     assert coordinator.starts == 0
 
 
-def test_start_button_refused_without_data(component, coordinator):
+@pytest.mark.parametrize("key", ["start_charging", "stop_charging"])
+def test_buttons_refused_without_data(component, coordinator, key):
     from homeassistant.exceptions import HomeAssistantError
 
     coordinator.data = None
     with pytest.raises(HomeAssistantError):
-        _press(component, coordinator)
-    assert coordinator.starts == 0
+        _press(component, coordinator, key=key)
+    assert (coordinator.starts, coordinator.stops) == (0, 0)
 
 
-def test_start_button_write_failure_is_a_ha_error(component, coordinator):
+@pytest.mark.parametrize("key, state", [("start_charging", "preparing"),
+                                        ("stop_charging", "charging")])
+def test_button_write_failure_is_a_ha_error(component, coordinator, key, state):
     from homeassistant.exceptions import HomeAssistantError
 
     coordinator.fail_writes = component.button.NexBlueError("charger unreachable")
     with pytest.raises(HomeAssistantError, match="charger unreachable"):
-        _press(component, coordinator, "preparing")
+        _press(component, coordinator, state, key=key)
+
+
+@pytest.mark.parametrize("state", sorted(nb.STATE_NAMES.values()))
+def test_stop_button_in_every_state(component, coordinator, state):
+    from homeassistant.exceptions import HomeAssistantError
+
+    assert _button(component, coordinator, "stop_charging").unique_id == "E2TEST0001_stop_charging"
+    if state in {"charging", "suspended_evse", "suspended_ev"}:
+        _press(component, coordinator, state, key="stop_charging")
+        assert coordinator.stops == 1
+    else:
+        with pytest.raises(HomeAssistantError, match=f"suspended_ev.*{state}. Nothing was sent"):
+            _press(component, coordinator, state, key="stop_charging")
+        assert coordinator.stops == 0
+    assert coordinator.starts == 0
+    assert coordinator.written == [] and coordinator.keepalive.setpoint is None  # limit untouched
 
 
 # --------------------------------------------------------------------------
@@ -434,3 +463,193 @@ def test_binary_sensors_unavailable_without_data(component, coordinator):
     coordinator.data = None
     for description in component.binary_sensor.BINARY_SENSORS:
         assert not component.binary_sensor.NexBlueBinarySensor(coordinator, description).available
+
+
+
+# --------------------------------------------------------------------------
+# Phase mode select and its limiter
+# --------------------------------------------------------------------------
+
+class _PhaseClient:
+    """Mirrors NexBlueClient.set_phase_mode against the fake coordinator's data."""
+
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+        self.writes = []
+
+    async def set_phase_mode(self, mode, before_write=None):
+        if self.coordinator.data.phase_mode == mode:
+            return False
+        if before_write is not None:
+            before_write()
+        self.writes.append(mode)
+        return True
+
+
+class _WallClock:
+    def __init__(self, now=1_760_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def phased(component, coordinator):
+    """The fake coordinator with the real async_set_phase_mode and a real limiter."""
+    coordinator.clock = _WallClock()
+    coordinator.phase_limiter = component.nexblue_client.PhaseSwitchLimiter(coordinator.clock)
+    coordinator.client = _PhaseClient(coordinator)
+
+    async def no_refresh():
+        return None
+
+    coordinator.async_request_refresh = no_refresh
+    coordinator.async_set_phase_mode = types.MethodType(
+        component.coordinator.NexBlueCoordinator.async_set_phase_mode, coordinator)
+    return coordinator
+
+
+def _select(component, coordinator, option):
+    import asyncio
+
+    entity = component.select.NexBluePhaseMode(coordinator)
+    asyncio.run(entity.async_select_option(option))
+    return entity
+
+
+def _set_phase(coordinator, code):
+    import dataclasses
+
+    coordinator.data = dataclasses.replace(coordinator.data, phase_mode=code)
+
+
+@pytest.mark.parametrize("code, option", [(0, "adaptive"), (1, "single_phase"),
+                                          (2, "three_phase"), (9, None)])
+def test_phase_select_option_mapping(component, coordinator, code, option):
+    _set_phase(coordinator, code)
+    entity = component.select.NexBluePhaseMode(coordinator)
+    assert entity.options == ["adaptive", "single_phase", "three_phase"]
+    assert entity.current_option == option
+    assert entity.unique_id == "E2TEST0001_phase_mode_select"
+    assert component.select.MODES_BY_NAME == {"adaptive": 0, "single_phase": 1, "three_phase": 2}
+
+
+def test_phase_select_current_mode_is_a_no_op(component, phased):
+    _select(component, phased, "adaptive")              # fixture reports adaptive
+    assert phased.client.writes == []
+    assert phased.phase_limiter.as_dict() == {"switches": [], "session_switches": 0}
+
+
+def test_phase_select_writes_a_change_and_counts_it(component, phased):
+    _select(component, phased, "single_phase")
+    assert phased.client.writes == [1]
+    assert phased.phase_limiter.as_dict() == {"switches": [phased.clock.now], "session_switches": 1}
+
+
+def test_phase_select_refuses_within_10_min_and_writes_nothing(component, phased):
+    from homeassistant.exceptions import HomeAssistantError
+
+    _select(component, phased, "single_phase")
+    _set_phase(phased, 1)
+    phased.clock.now += 300
+    with pytest.raises(HomeAssistantError, match="10 min.*Nothing was sent"):
+        _select(component, phased, "three_phase")
+    assert phased.client.writes == [1]
+    phased.clock.now += 300
+    _select(component, phased, "three_phase")
+    assert phased.client.writes == [1, 2]
+
+
+def test_phase_select_refuses_a_third_switch_within_an_hour(component, phased):
+    from homeassistant.exceptions import HomeAssistantError
+
+    for code, option in ((1, "single_phase"), (2, "three_phase")):
+        _select(component, phased, option)
+        _set_phase(phased, code)
+        phased.clock.now += 700
+    with pytest.raises(HomeAssistantError, match="per hour"):
+        _select(component, phased, "adaptive")
+    assert phased.client.writes == [1, 2]
+
+
+def test_phase_select_refuses_a_seventh_switch_in_a_session(component, phased):
+    from homeassistant.exceptions import HomeAssistantError
+
+    phased.phase_limiter.session_switches = 6
+    with pytest.raises(HomeAssistantError, match="session"):
+        _select(component, phased, "single_phase")
+    assert phased.client.writes == []
+
+
+def test_phase_limiter_survives_a_restart(component, phased):
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers.restore_state import RestoredExtraData
+    import asyncio
+
+    before = _select(component, phased, "single_phase")
+    stored = before.extra_restore_state_data.as_dict()
+    assert stored == {"limiter": {"switches": [phased.clock.now], "session_switches": 1}}
+
+    # "Restart": a fresh limiter, restored from storage, a few minutes later.
+    phased.phase_limiter = component.nexblue_client.PhaseSwitchLimiter(phased.clock)
+    after = component.select.NexBluePhaseMode(phased)
+
+    async def last_extra():
+        return RestoredExtraData(stored)
+
+    async def noop():
+        return None
+
+    after.async_get_last_extra_data = last_extra
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(component.select.RestoreEntity, "async_added_to_hass", lambda self: noop())
+        asyncio.run(after.async_added_to_hass())
+    assert phased.phase_limiter.session_switches == 1
+    _set_phase(phased, 1)
+    phased.clock.now += 120
+    with pytest.raises(HomeAssistantError, match="10 min"):
+        asyncio.run(after.async_select_option("three_phase"))
+    assert phased.client.writes == [1]
+
+
+@pytest.mark.parametrize("stored", [{"limiter": "x"}, {"limiter": {"switches": 1}}, {}])
+def test_phase_limiter_unreadable_storage_is_ignored(component, phased, caplog, stored):
+    from homeassistant.helpers.restore_state import RestoredExtraData
+    import asyncio
+    import logging
+
+    entity = component.select.NexBluePhaseMode(phased)
+
+    async def last_extra():
+        return RestoredExtraData(stored)
+
+    async def noop():
+        return None
+
+    entity.async_get_last_extra_data = last_extra
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as mp:
+        mp.setattr(component.select.RestoreEntity, "async_added_to_hass", lambda self: noop())
+        asyncio.run(entity.async_added_to_hass())
+    assert phased.phase_limiter.as_dict() == {"switches": [], "session_switches": 0}
+    assert any("phase-switch limiter" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("state, expected", [("charging", 5), ("available", 0),
+                                             ("faulted", 0), ("finishing", 5)])
+def test_every_poll_lets_the_limiter_see_the_session(component, phased, state, expected):
+    import asyncio
+    import dataclasses
+
+    code = next(c for c, n in nb.STATE_NAMES.items() if n == state)
+    data = dataclasses.replace(phased.data, state=code)
+
+    async def poll(keepalive, interval):
+        return data
+
+    phased.client.poll = poll
+    phased.update_interval = None
+    phased._apply_interval = lambda timeout: None
+    phased.phase_limiter.session_switches = 5
+    asyncio.run(component.coordinator.NexBlueCoordinator._async_update_data(phased))
+    assert phased.phase_limiter.session_switches == expected

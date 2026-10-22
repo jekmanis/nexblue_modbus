@@ -87,7 +87,7 @@ def _translation_keys(platform: str) -> set[str]:
     return keys
 
 
-@pytest.mark.parametrize("platform", ["sensor", "binary_sensor", "number", "button"])
+@pytest.mark.parametrize("platform", ["sensor", "binary_sensor", "number", "button", "select"])
 def test_every_entity_has_a_name(platform):
     strings = json.loads((COMPONENT_DIR / "strings.json").read_text(encoding="utf-8"))
     used = _translation_keys(platform)
@@ -102,6 +102,8 @@ def test_enum_state_translations_cover_options():
     sensor = json.loads((COMPONENT_DIR / "strings.json").read_text(encoding="utf-8"))["entity"]["sensor"]
     assert set(sensor["state"]["state"]) == set(nb.STATE_NAMES.values())
     assert set(sensor["phase_mode"]["state"]) == set(nb.PHASE_MODE_NAMES.values())
+    select = json.loads((COMPONENT_DIR / "strings.json").read_text(encoding="utf-8"))["entity"]["select"]
+    assert set(select["phase_mode"]["state"]) == set(nb.PHASE_MODE_NAMES.values())
 
 
 def test_config_flow_fields_have_labels():

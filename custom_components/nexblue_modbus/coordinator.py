@@ -18,6 +18,7 @@ from .nexblue_client import (
     CurrentLimitKeepalive,
     NexBlueClient,
     NexBlueError,
+    PhaseSwitchLimiter,
     keepalive_interval,
 )
 from .nexblue_client import DeviceInfo as ChargerIdentity
@@ -44,6 +45,9 @@ class NexBlueCoordinator(DataUpdateCoordinator[ChargerData]):
     Once HA has set the Current Limit, each poll also re-writes it when the keepalive
     is due (see CurrentLimitKeepalive), and the poll interval is shortened to the
     keepalive interval if the configured scan interval is longer.
+
+    Phase-mode writes go through ``phase_limiter``, which sees every poll so that an
+    unplugged car ends the charging session.
     """
 
     config_entry: NexBlueConfigEntry
@@ -60,6 +64,7 @@ class NexBlueCoordinator(DataUpdateCoordinator[ChargerData]):
         self.client = client
         self.identity = identity
         self.keepalive = CurrentLimitKeepalive()
+        self.phase_limiter = PhaseSwitchLimiter()
         self._scan_interval = scan_interval(entry)
         self.device_info = DeviceInfo(
             identifiers={(DOMAIN, identity.serial)},
@@ -78,6 +83,7 @@ class NexBlueCoordinator(DataUpdateCoordinator[ChargerData]):
         except NexBlueError as exc:
             raise UpdateFailed(str(exc)) from exc
         self._apply_interval(data.fallback_timeout)
+        self.phase_limiter.observe(data.state_name)
         return data
 
     def _apply_interval(self, fallback_timeout: int) -> None:
@@ -97,3 +103,21 @@ class NexBlueCoordinator(DataUpdateCoordinator[ChargerData]):
         """IF_START = START (the client refuses unless the charger is preparing), then poll."""
         await self.client.start_charging()
         await self.async_request_refresh()
+
+    async def async_stop_charging(self) -> None:
+        """IF_START = STOP (refused unless charging or suspended), then poll.
+
+        The current limit and its keepalive stay as they are.
+        """
+        await self.client.stop_charging()
+        await self.async_request_refresh()
+
+    async def async_set_phase_mode(self, mode: int) -> bool:
+        """Write 1007 if it is a real change and the limiter allows it; True if written."""
+        now = self.phase_limiter.now()
+        written = await self.client.set_phase_mode(
+            mode, before_write=lambda: self.phase_limiter.check(now))
+        if written:
+            self.phase_limiter.record(now)
+            await self.async_request_refresh()
+        return written
