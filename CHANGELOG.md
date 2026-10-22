@@ -11,7 +11,7 @@
   `preparing`. The write scope is now 1000-1001 plus 1006.
 - **Car connected** binary sensor (device class plug), derived from the charger state.
 - Waiting bit 7 is labelled "Phase switching".
-- Marketplace / HACS readiness: brand icons, manifest category, validation workflows.
+- Marketplace / HACS readiness: brand icons, validation workflows.
 
 ## 0.1.0 - 2026-10-21
 
