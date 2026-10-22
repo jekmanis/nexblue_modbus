@@ -1,6 +1,6 @@
 [project]
 name = "nexblue"
-version = "0.2.0"
+version = "0.3.0"
 description = "Home Assistant integration for NexBlue EV chargers over local Modbus TCP"
 readme = "README.md"
 requires-python = ">=3.14"
