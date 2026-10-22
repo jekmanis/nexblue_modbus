@@ -45,8 +45,8 @@ def test_manifest_is_marketplace_ready():
     for key in ("codeowners", "documentation", "issue_tracker", "version", "integration_type"):
         assert manifest[key], key
     assert manifest["integration_type"] == "device"
-    assert 1 <= len(manifest["categories"]) <= 3
-    assert len(set(manifest["categories"])) == len(manifest["categories"])
+    # hassfest@master (2026.10 schema) rejects "categories"; add it back once hassfest accepts it.
+    assert "categories" not in manifest
 
 
 def test_hacs_json():
