@@ -9,6 +9,9 @@ pymodbus 3.13.1. The test suite also passes against 2026.10.0, the minimum in
 `hacs.json`. Older releases aren't tested. The register map is in [FINDINGS.md](FINDINGS.md), and the vendor's
 document is <https://nexblue.com/en-no/pages/nexblue-modbus-technical-doc>.
 
+This is an independent community project. It is not affiliated with, endorsed by or
+supported by NexBlue. "NexBlue" is used only to name the hardware it works with.
+
 ## 1. Enable Modbus TCP on the charger
 
 1. Update the charger to firmware **03.09.88 or later** (Delta: 03.08.59).
@@ -22,13 +25,23 @@ document is <https://nexblue.com/en-no/pages/nexblue-modbus-technical-doc>.
 connected, other Modbus tools (evcc, `tools/nexblue_modbus.py`, ...) are refused. Disable
 the integration's config entry before you use another client.
 
-## 2. Install
+## 2. Installation
 
-Copy `custom_components/nexblue_modbus/` into the `custom_components/` folder of your Home
-Assistant config, then **restart Home Assistant** (a full restart, because a new custom
-component isn't picked up by a reload).
+Home Assistant 2026.10.0 or later.
 
-Or use the deploy tool from this repo. It backs up, copies over SMB, restarts and adds
+**HACS / Marketplace (custom repository).** The integration isn't in the default catalog
+yet, so add it as a custom repository: in HACS open the menu (⋮) → **Custom
+repositories**, enter `https://github.com/jekmanis/nexblue_modbus` with type
+**Integration**, then download **NexBlue Modbus TCP** and restart Home Assistant. Updates
+then show up like any other. Once it is in the default catalog, searching for it is
+enough.
+
+**Manual.** Copy `custom_components/nexblue_modbus/` (including `brand/` and
+`translations/`) into the `custom_components/` folder of your Home Assistant config, then
+**restart Home Assistant** (a full restart, because a new custom component isn't picked
+up by a reload).
+
+**Deploy tool.** Or use the deploy tool from this repo. It backs up, copies over SMB, restarts and adds
 the config entry. It needs:
 
 - [uv](https://docs.astral.sh/uv/)
