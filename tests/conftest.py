@@ -7,6 +7,7 @@ run ``__init__.py``, which needs Home Assistant.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -17,7 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = REPO_ROOT / "custom_components" / "nexblue_modbus"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-sys.path.insert(0, str(COMPONENT_DIR))
+# Loaded by file path, not by putting COMPONENT_DIR on sys.path: the component's
+# select.py would shadow the standard library's select module.
+_spec = importlib.util.spec_from_file_location("nexblue_client", COMPONENT_DIR / "nexblue_client.py")
+_module = importlib.util.module_from_spec(_spec)
+sys.modules["nexblue_client"] = _module
+_spec.loader.exec_module(_module)
 
 
 @pytest.fixture

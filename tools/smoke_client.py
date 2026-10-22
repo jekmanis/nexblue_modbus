@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
 COMPONENT_DIR = Path(__file__).resolve().parent.parent / "custom_components" / "nexblue_modbus"
-sys.path.insert(0, str(COMPONENT_DIR))
-
-import nexblue_client as nb  # noqa: E402 - path set up above
+# By file path: COMPONENT_DIR on sys.path would let select.py shadow the stdlib module.
+_spec = importlib.util.spec_from_file_location("nexblue_client", COMPONENT_DIR / "nexblue_client.py")
+nb = importlib.util.module_from_spec(_spec)
+sys.modules["nexblue_client"] = nb
+_spec.loader.exec_module(nb)
 
 
 def show(info: nb.DeviceInfo, data: nb.ChargerData) -> None:
