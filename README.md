@@ -2,7 +2,8 @@
 
 `nexblue_modbus` is a custom Home Assistant integration for the NexBlue Edge 2 EV
 charger. It works over local Modbus TCP, with no cloud. It creates a **NexBlue <model>**
-device with live sensors, a **Current limit** control and a **Start charging** button.
+device with live sensors, a **Current limit** control, **Start/Stop charging** buttons and
+a **Phase mode** select.
 
 Tested with an Edge 2 (NB1620B, FW 03.09.97) on Home Assistant 2026.10.2, which bundles
 pymodbus 3.13.1. The test suite also passes against 2026.10.0, the minimum in
@@ -92,6 +93,8 @@ Entity IDs start with the device name, which defaults to `NexBlue <model>`. For 
 | `sensor.<device>_max_current` | input 136-137 | A, the maximum set in the app |
 | `number.<device>_current_limit` | holding 1000-1001 | 6 A up to the app max current (input 136-137, at most 32 A); read and **write**, kept alive (below) |
 | `button.<device>_start_charging` | holding 1006 (IF_START) | Starts charging. Only acts in state `preparing` (below) |
+| `button.<device>_stop_charging` | holding 1006 (IF_START) | Stops charging. Only acts in charging, suspended_evse, suspended_ev (below) |
+| `select.<device>_phase_mode` | input 138 (shown), holding 1007 (written) | adaptive, single_phase, three_phase; limited to NexBlue's switching rules (below) |
 | `binary_sensor.<device>_car_connected` | input 100 | Plug: on in preparing, charging, suspended_evse, suspended_ev, finishing; off in available, reserved, unavailable, faulted |
 | `binary_sensor.<device>_error` | input 400 | Diagnostic, on when any error bit is set; attribute `active` lists them |
 | `binary_sensor.<device>_warning` | input 401 | Diagnostic, as above for warnings |
@@ -102,22 +105,46 @@ Entity IDs start with the device name, which defaults to `NexBlue <model>`. For 
 
 The device info shows the model, serial number, firmware and hardware version.
 
-**Write scope:** the integration writes only the Current limit (holding 1000-1001) and
-IF_START = 1 (START, holding 1006) from the Start charging button. It never writes STOP.
-Fallback limit/timeout (1002-1005) and phase mode (1007) are read or ignored, because
-writing them changes charging behaviour.
+**Write scope:** the integration writes only the Current limit (holding 1000-1001),
+IF_START (holding 1006: 1 START, 0 STOP) from the two buttons, and Runtime Phase Mode
+(holding 1007: 0, 1 or 2) from the Phase mode select. Fallback limit/timeout (1002-1005)
+are only read, because writing them changes how the charger behaves without HA.
 
-### Start charging
+### Start and stop charging
 
-The button writes IF_START = 1 (START). It only acts while the charger is in state
+**Start charging** writes IF_START = 1. It only acts while the charger is in state
 `preparing`: a car is plugged in but charging hasn't started, for example because you
-usually start it in the NexBlue app or by a schedule. In any other state (already
-charging, no car, ...) a press fails with an error and nothing is sent. The state is
-checked again on the charger right before the write. There is no stop button.
+usually start it in the NexBlue app or by a schedule. **Stop charging** writes IF_START =
+0 and only acts while the charger is `charging`, `suspended_evse` or `suspended_ev`. It
+doesn't change the current limit or its keepalive. In any other state a press fails with
+an error and nothing is sent. The state is checked again on the charger right before the
+write.
 
 - IF_START has no effect while the charger is controlled by OCPP (vendor document).
-- The NexBlue app, portal and cloud API can also start and stop charging. NexBlue
-  recommends using one authorization method at a time.
+- The NexBlue app, portal and cloud API can also start and stop charging. Avoid sending
+  conflicting commands from them and from Modbus at the same time; NexBlue recommends
+  one authorization method at a time.
+
+### Phase mode
+
+The select shows Phase charging (input 138) and writes Runtime Phase Mode (holding
+1007). Both use the same encoding: 0 adaptive, 1 single phase (forced), 2 three phase
+(forced). Choosing the mode the charger already reports writes nothing.
+
+NexBlue limits phase switching to at least 10 minutes between switches, at most 2 in
+any 60 minutes and at most 6 per charging session. The integration refuses a change that
+would break one of these with an error, and writes nothing:
+
+- A session ends when the charger reports no car (available, reserved, unavailable,
+  faulted); the per-session count then starts again.
+- The switch times (UTC) and the session count are kept across HA restarts and reloads,
+  so a restart doesn't reset the limits.
+- Only switches made through this integration count. Switches from the NexBlue app or
+  portal aren't seen, so leave enough room if you also use those.
+- The phase mode itself is not restored or kept alive. After an AC power cycle the
+  charger reverts its writable settings (1000-1007) to their defaults. The keepalive
+  writes the current limit again; the phase mode stays at whatever the charger reverted
+  to until you choose it again.
 
 ### Current limit keepalive
 
@@ -143,8 +170,29 @@ keepalive:
   range (for example, the app maximum was lowered), it's clamped and a warning is logged.
 
 To hand control back to the charger's own fallback, delete the integration entry and add
-it again. That clears the stored limit. Its effect during a real charging session hasn't
-been verified yet.
+it again. That clears the stored limit. In a charging session (Edge 2, single phase), a
+change from 16 A to 10 A and back took effect within about 10-15 s each way.
+
+## Compared with NexBlue's YAML example
+
+NexBlue publishes a YAML package for Home Assistant's built-in Modbus integration
+([examples/modbus](https://github.com/NexBlue-AB/home-assistant-nexblue/tree/main/examples/modbus)).
+It is a good reference and covers the same registers. The differences:
+
+| | This integration | NexBlue's YAML example |
+|---|---|---|
+| Setup | Config flow from the UI, one device per charger with model, serial and firmware | YAML package in `configuration.yaml`, separate entities |
+| Polling | One pass over four register blocks per scan interval | 38 sensors and a switch, each polled separately on its own interval (5-300 s) |
+| Current limit | Kept alive: re-written before the fallback timeout runs out, and restored after HA restarts | One-shot write; the charger falls back after the timeout |
+| Values | Named states and labelled bitsets, false-zero guards on the energy counters, phase-switch limits enforced, unit tests | Raw values; phase-switch limits documented, not enforced |
+| Start/stop | Two buttons, each only in the states where it makes sense | One switch that writes 1006 |
+
+What the YAML example has that this integration doesn't:
+
+- Writes to the fallback limit and fallback timeout (1002-1005).
+- Model support claims beyond the Edge 2: Edge Max and Point 2 (UK) on firmware 03.09.88
+  or later, and Delta, Delta Max and Delta Max (UK) on 03.08.59 or later. This
+  integration is only tested on an Edge 2.
 
 ## Development
 

@@ -72,3 +72,19 @@ IP adreses, hostname un sērijas numurs publiskajai versijai aizstāti ar piemē
   biti 8–15 rezervēti). Redzēts dzīvē 2026-10-21 lādēšanas laikā (Phase mode adaptive, auto lādē vienfāzes uz L1):
   charging -> suspended_evse ar Waiting 128 (bit7) un jaudu 0 uz ~9 s -> atkal charging -> pēc ~20 s finishing.
   Integrācija bit7 tagad rāda kā "Phase switching".
+
+## NexBlue oficiālais YAML piemērs un dokumentācija (2026-10-22)
+- Avots: https://github.com/NexBlue-AB/home-assistant-nexblue/tree/main/examples/modbus (HA iebūvētās `modbus`
+  integrācijas YAML pakotne) un https://nexblue.com/en-no/pages/nexblue-modbus-technical-doc.
+- **Fāžu pārslēgšanas ierobežojumi (1007):** vismaz 10 min starp pārslēgšanām, ne vairāk kā 2 jebkurās 60 min,
+  ne vairāk kā 6 vienā uzlādes sesijā. YAML piemērs tos neievēro; integrācija tos ievēro (PhaseSwitchLimiter).
+- **Kodējums:** input 138 "Phase Charging" un holding 1007 "Runtime Phase Mode" – abi UINT16,
+  0 Adaptive, 1 Force Single Phase, 2 Force Three Phase (dokumentācija un YAML kartējums sakrīt).
+- **AC strāvas pārtraukums:** rakstāmie iestatījumi 1000–1007 atgriežas pie noklusējuma ("must be written again").
+  Keepalive strāvas limitu ieraksta atkārtoti; fāžu režīmu integrācija neatjauno.
+- **1006 IF_START:** 0 = STOP, 1 = START; OCPP kontrolē nedarbojas. Jāizvairās no pretrunīgām komandām no
+  lietotnes, portāla, OpenAPI un Modbus vienlaikus.
+- **Atbalstītie modeļi (pēc NexBlue):** Edge 2, Edge Max, Point 2 (UK) ar FW ≥ 03.09.88; Delta, Delta Max,
+  Delta Max (UK) ar FW ≥ 03.08.59. Integrācija pārbaudīta tikai ar Edge 2.
+- Konteksts: 2026-10-21 18:50:56 tūlīt pēc limita maiņas 10→16 A adaptīvais režīms iedeva Waiting bit7
+  (Phase switching), ~9 s suspended_evse, tad charging, pēc ~20 s finishing; auto lādē vienfāzes režīmā.

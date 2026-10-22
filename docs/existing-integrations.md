@@ -3,8 +3,9 @@
 Question: is there a maintained Home Assistant integration that talks to the NexBlue
 Edge 2 over **local Modbus TCP** (port 502, unit 200)?
 
-**Verdict: no.** Every NexBlue HA integration found uses the NexBlue cloud. So
-`nexblue_modbus` is built here.
+**Verdict: no.** Every NexBlue HA integration found uses the NexBlue cloud. NexBlue's own
+Modbus example is a YAML configuration for HA's built-in `modbus` integration, not an
+integration. So `nexblue_modbus` is built here.
 
 | Source | URL | What it is | Verdict |
 |---|---|---|---|
@@ -19,6 +20,7 @@ Edge 2 over **local Modbus TCP** (port 502, unit 200)?
 | kimdv/aionexblue | https://github.com/kimdv/aionexblue | Cloud API library (from FINDINGS.md, not re-checked) | Cloud, doesn't count |
 | HA community forum | https://community.home-assistant.io/search?q=nexblue%20modbus | No thread found via web search (forum search itself not reachable from the agent) | None found |
 | evcc template | https://github.com/evcc-io/evcc/blob/master/templates/definition/charger/nexblue.yaml | Cloud: user/password/serial, no Modbus parameters | Cloud, doesn't count |
+| NexBlue-AB/home-assistant-nexblue, `examples/modbus` | https://github.com/NexBlue-AB/home-assistant-nexblue/tree/main/examples/modbus | Official YAML package for HA's built-in `modbus` integration: sensors, a 1006 switch, one-shot scripts for 1000-1007 | Configuration example, not an integration; register map agrees with ours |
 | chloepriceless/dvhub | https://github.com/chloepriceless/dvhub | Node.js energy manager (not HA) with a Modbus TCP NexBlue driver: unit 200, DCBA, IR 100/126/130, HR 1000-1004 | Not HA; register map agrees with ours |
 | timlaing/modbus_local_gateway | https://github.com/timlaing/modbus_local_gateway | Generic YAML-profile Modbus gateway | No NexBlue profile |
 
