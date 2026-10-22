@@ -153,3 +153,16 @@ def test_probe_tool_only_writes_current_limit():
     subparsers = next(a for a in tool.build_parser()._actions
                       if isinstance(a, argparse._SubParsersAction))
     assert set(subparsers.choices) == {"read", "raw", "write-current", "selftest"}
+
+
+@pytest.mark.parametrize("name, size", [("icon.png", 256), ("icon@2x.png", 512),
+                                        ("dark_icon.png", 256), ("dark_icon@2x.png", 512)])
+def test_brand_icons(name, size):
+    """brand/ icons (HA 2026.3+): square PNG, 256 px and 512 px for @2x, with alpha."""
+    import struct
+
+    raw = (COMPONENT_DIR / "brand" / name).read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR"
+    width, height, _depth, color_type = struct.unpack(">IIBB", raw[16:26])
+    assert (width, height) == (size, size)
+    assert color_type == 6  # RGBA: transparent background
